@@ -62,6 +62,8 @@ typedef struct world
 SDL_Surface *screen;
 camera_t cam;
 world_t *bworld = NULL;
+int fps_counter = 0;
+int fps_waituntil = 0;
 
 float ufrand(void)
 {
@@ -397,12 +399,25 @@ int main(int argc, char *argv[])
 
 	SDL_WarpMouse(screen->w/2, screen->h/2);
 	int inhibit_warp = 1;
+	fps_waituntil = SDL_GetTicks() + 100;
 
 	while(!quitflag)
 	{
 		render_screen();
 		SDL_Flip(screen);
-		SDL_Delay(10);
+
+		fps_counter++;
+		int ntime = SDL_GetTicks();
+		if(ntime >= fps_waituntil)
+		{
+			char buf[80];
+			sprintf(buf, "tesserine | FPS: %i", fps_counter);
+			fps_counter = 0;
+			SDL_WM_SetCaption(buf, NULL);
+			fps_waituntil += 1000;
+		}
+
+		//SDL_Delay(10);
 
 		SDL_Event ev;
 
