@@ -35,6 +35,13 @@
 
 #define EPSILON 0.00000000000001f
 
+static uint32_t facecol[4] = {
+	0xFF0000FF,
+	0xFF00FF00,
+	0xFFFF0000,
+	0xFFCC7700,
+};
+
 typedef union v4f
 {
 	float a[4]; // array
@@ -45,7 +52,14 @@ typedef union v4f
 	struct { float r,g,b,a; } c; // colour
 
 	__m128 m; // __m128
+	__m128i mi; // __m128i
 } v4f_t;
+
+typedef union
+{
+	float f;
+	int i;
+} flint;
 
 typedef struct camera
 {
@@ -208,6 +222,8 @@ world_t *world_gen(int size)
 
 	// DONE
 	printf(" Done!\n");
+
+	return wl;
 }
 
 void rotate_pair(float amt, v4f_t *a, v4f_t *b)
@@ -253,9 +269,78 @@ void init_camera(camera_t *c)
 	c->o[3].m = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
 }
 
-static void render_surface_trace(uint32_t *pixel, int length, __m128i ci, __m128 cf, __m128 bt0, __m128 bt1, __m128 t0, __m128 t1, __m128i g)
+static void render_surface_trace(uint32_t *pixel, int length, __m128i ci, __m128 cf0, __m128 cf1, __m128 v0, __m128 v1, float ta0, float ta1, const v4f_t *g);
+
+static void render_surface_hface(uint32_t *pixel, int length, __m128i ci, __m128 cf0, __m128 cf1, __m128 v0, __m128 v1, float ta0, float ta1, int face, const v4f_t *g)
 {
-	//
+	int i;
+
+	// TODO: actually trace properly
+
+	uint32_t col = facecol[face];
+
+	for(i = 0; i < length; i++)
+		*(pixel++) = col;
+}
+
+static void render_surface_trace(uint32_t *pixel, int length, __m128i ci, __m128 cf0, __m128 cf1, __m128 v0, __m128 v1, float ta0, float ta1, const v4f_t *g)
+{
+	// calculate time to boundary
+	__m128 t0 = _mm_div_ps(cf0, v0);
+	__m128 t1 = _mm_div_ps(cf1, v1);
+
+	// inject indices to see what hits first
+	// warning! i am bit twiddling a float here!
+	t0 = (__m128)_mm_or_si128(
+		_mm_setr_epi32(0, 1, 2, 3),
+		_mm_and_si128(
+			_mm_set1_epi32(~3),
+			(__m128i)t0));
+
+	t1 = (__m128)_mm_or_si128(
+		_mm_setr_epi32(0, 1, 2, 3),
+		_mm_and_si128(
+			_mm_set1_epi32(~3),
+			(__m128i)t1));
+	
+	// take the min of each
+	v4f_t tg;
+	flint m0, m1;
+	
+	// movehl b a: a2 a3 b2 b3
+	// movelh a b: a0 a1 b0 b1
+	// min them  : aX aY bX bY
+	tg.m = _mm_min_ps(_mm_movehl_ps(t1, t0), _mm_movelh_ps(t0, t1));
+
+	// final mins of each
+	m0.f = (tg.a[0] < tg.a[1] ? tg.a[0] : tg.a[1]);
+	m1.f = (tg.a[2] < tg.a[3] ? tg.a[2] : tg.a[3]);
+
+	// get indices of first intersection axes
+	int msel0 = m0.i & 3;
+	int msel1 = m1.i & 3;
+
+	ta0 += m0.f;
+	ta1 += m1.f;
+	cf0 = _mm_sub_ps(cf0, _mm_mul_ps(_mm_set1_ps(m0.f), v0));
+	cf1 = _mm_sub_ps(cf1, _mm_mul_ps(_mm_set1_ps(m1.f), v1));
+
+	// check if they're the same
+	if(msel0 == msel1)
+	{
+		// they are? awesome! we can just continue from here.
+		v4f_t civ, cf0v, cf1v;
+		civ.mi = ci;
+		cf0v.m = cf0;
+		cf1v.m = cf1;
+		civ.i[msel0] += g->i[msel0];
+		cf0v.a[msel0] = 1.0f;
+		cf1v.a[msel0] = 1.0f;
+
+		return render_surface_hface(pixel, length, civ.mi, cf0v.m, cf1v.m, v0, v1, ta0, ta1, msel0, g);
+	} else {
+		// well, crap. we have to find the split point, then split this into two.
+	}
 }
 
 static void render_span_split_sections(int sec, uint32_t *pixel, int length, __m128i ci, __m128 cf, const v4f_t *s0, const v4f_t *s1, const v4f_t *v0, const v4f_t *v1)
@@ -269,9 +354,14 @@ static void render_span_split_sections(int sec, uint32_t *pixel, int length, __m
 		__m128 av0 = _mm_and_ps((__m128)_mm_set1_epi32(0x7FFFFFFF), v0->m);
 		__m128 av1 = _mm_and_ps((__m128)_mm_set1_epi32(0x7FFFFFFF), v1->m);
 
-		// get base times
-		__m128 bt0 = _mm_rcp_ps(av0);
-		__m128 bt1 = _mm_rcp_ps(av1);
+		// epsilon them
+		av0 = _mm_max_ps(av0, _mm_set1_ps(EPSILON));
+		av1 = _mm_max_ps(av1, _mm_set1_ps(EPSILON));
+
+		// get distances to boundary
+		__m128 dsign = (__m128)_mm_xor_si128((__m128i)_mm_set1_ps(1.0f), _mm_and_si128(s0->mi, _mm_xor_si128((__m128i)_mm_set1_ps(-1.0f), (__m128i)_mm_set1_ps(1.0f))));
+		__m128 doffs = _mm_and_ps(s0->m, _mm_set1_ps(1.0f));
+		__m128 dtotal = _mm_add_ps(doffs, _mm_mul_ps(cf, dsign));
 
 		// generate pixel data
 		// TODO: move this through the chain a bit...
@@ -280,16 +370,22 @@ static void render_span_split_sections(int sec, uint32_t *pixel, int length, __m
 		__m128i cpack;
 		
 		//cpack = _mm_cvtps_epi32(_mm_add_ps(_mm_set1_ps(127.5f), _mm_mul_ps(_mm_set1_ps(255.0f/2.0f), v.m)));
-		uint32_t *cbase = s0->a;
+		const uint32_t *cbase = s0->i;
 		uint32_t cval = 
 			((cbase[0]&0xFF)<<0)^
 			((cbase[1]&0xFF)<<8)^
 			((cbase[2]&0xFF)<<16)^
 			(cbase[3]&0xAAAAAAAA);
+		cval &= 0x1F1F1F1F;
 
 		int i;
 		for(i = 0; i < length; i++)
-			*(pixel++) = cval;
+			pixel[i] = cval;
+
+		v4f_t g;
+		g.mi = _mm_or_si128(s0->mi, _mm_set1_epi32(1));
+
+		render_surface_trace(pixel, length, ci, dtotal, dtotal, av0, av1, 0.0f, 0.0f, &g);
 	} else {
 		// check for a split
 		if(s0->i[sec] != s1->i[sec])
@@ -349,7 +445,7 @@ static void render_span(const camera_t *c, uint32_t *pixel, int length, float x0
 
 	// calculate current cell int/frac parts
 	__m128i ci = _mm_cvtps_epi32(p.m);
-	__m128 cf = _mm_cvtepi32_ps(ci);
+	__m128 cf = _mm_sub_ps(p.m, _mm_cvtepi32_ps(ci));
 
 	// find the velocity splits
 	render_span_split_sections(0, pixel, length, ci, cf, &s0, &s1, &v0, &v1);
@@ -391,11 +487,14 @@ int main(int argc, char *argv[])
 	SDL_WM_SetCaption("tesserine prealpha", NULL);
 	screen = SDL_SetVideoMode(800, 600, 32, 0);
 
-	init_camera(&cam);
-
 	int quitflag = 0;
 
 	bworld = world_gen(32); // you shouldn't have to go higher... 128 is OK (256MB of RAM) but not 256 (2GB of RAM, I think)
+	init_camera(&cam);
+	cam.p.v.x = (bworld->d.v.x+1.0f)/2.0f;
+	cam.p.v.y = 0.5f;
+	cam.p.v.z = (bworld->d.v.z+1.0f)/2.0f;
+	cam.p.v.w = (bworld->d.v.w+1.0f)/2.0f;
 
 	SDL_WarpMouse(screen->w/2, screen->h/2);
 	int inhibit_warp = 1;
