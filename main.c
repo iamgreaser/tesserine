@@ -102,9 +102,9 @@ void world_hmap_gen(int size, float *hmap, int x0, int z0, int w0, float amp, in
 	int z1b = (z0 + d);
 	int w1b = (w0 + d);
 
-	int x1 = x1 & (size - 1);
-	int z1 = z1 & (size - 1);
-	int w1 = w1 & (size - 1);
+	int x1 = x1b & (size - 1);
+	int z1 = z1b & (size - 1);
+	int w1 = w1b & (size - 1);
 
 	int xc = ((x0 + x1b)>>1) & (size - 1);
 	int zc = ((z0 + z1b)>>1) & (size - 1);
@@ -254,7 +254,7 @@ void cam_rotate(camera_t *c, float x, float y, float w)
 {
 	rotate_pair(x/100.0f, &(c->o[0]), &(c->o[2]));
 	rotate_pair(y/100.0f, &(c->o[1]), &(c->o[2]));
-	rotate_pair(w/3.0f, &(c->o[3]), &(c->o[2]));
+	rotate_pair(w/5.0f, &(c->o[3]), &(c->o[2]));
 
 	// This is the X roll correction.
 	rotate_pair(asinf(c->o[0].v.y), &(c->o[0]), &(c->o[1]));
@@ -274,6 +274,13 @@ void init_camera(camera_t *c)
 	c->o[2].m = _mm_set_ps(0.0f, 1.0f, 0.0f, 0.0f);
 	c->o[3].m = _mm_set_ps(1.0f, 0.0f, 0.0f, 0.0f);
 }
+
+const static float faces[4*4] = {
+	1.0f, 0.0f, 0.0f, 1.0f,
+	0.0f, 1.0f, 0.0f, 1.0f,
+	0.0f, 0.0f, 1.0f, 1.0f,
+	0.6f, 0.0f, 0.6f, 1.0f,
+};
 
 static uint32_t render_pixel(const v4f_t *ip, const v4f_t *iv)
 {
@@ -295,16 +302,16 @@ static uint32_t render_pixel(const v4f_t *ip, const v4f_t *iv)
 	db.m = _mm_add_ps(db1, _mm_and_ps(v_isneg.m, dbd));
 
 	// get positive velocity
-	__m128 vpos = (__m128)_mm_and_si128(
+	v4f_t vpos;
+	vpos.m = (__m128)_mm_and_si128(
 		_mm_set1_epi32(0x7FFFFFFF), (__m128i)v);
-	vpos = _mm_max_ps(_mm_set1_ps(EPSILON), vpos);
+	vpos.m = _mm_max_ps(_mm_set1_ps(EPSILON), vpos.m);
 
-	const static uint32_t faces[4] = {
-		0xFF0000FF,
-		0xFF00FF00,
-		0xFFFF0000,
-		0xFFAA00AA,
-	};
+	// normalise vpos
+	v4f_t vp_mul;
+	vp_mul.m = _mm_mul_ps(vpos.m, vpos.m);
+	float vp_dist = 1.0f/sqrtf(vp_mul.a[0] + vp_mul.a[1] + vp_mul.a[2] + vp_mul.a[3]);
+	vpos.m = _mm_mul_ps(vpos.m, _mm_set1_ps(vp_dist));
 
 	// get world dims
 	v4f_t ws;
@@ -318,7 +325,7 @@ static uint32_t render_pixel(const v4f_t *ip, const v4f_t *iv)
 		v4f_t t;
 		t.m = (__m128)_mm_or_si128(
 			_mm_setr_epi32(0,1,2,3),
-			_mm_and_si128((__m128i)_mm_div_ps(db.m, vpos),
+			_mm_and_si128((__m128i)_mm_div_ps(db.m, vpos.m),
 				_mm_set1_epi32(~3)));
 		t.m = _mm_min_ps(_mm_movehl_ps(t.m, t.m), _mm_movelh_ps(t.m, t.m));
 
@@ -326,7 +333,7 @@ static uint32_t render_pixel(const v4f_t *ip, const v4f_t *iv)
 		face = (*(int *)&tf) & 3;
 
 		db.m = _mm_sub_ps(db.m,
-			_mm_mul_ps(_mm_set1_ps(tf), vpos));
+			_mm_mul_ps(_mm_set1_ps(tf), vpos.m));
 		cell.i[face] += (v_isneg.i[face] ? -1 : 1);
 		db.a[face] += 1.0f;
 
@@ -339,7 +346,16 @@ static uint32_t render_pixel(const v4f_t *ip, const v4f_t *iv)
 			cell.vi.w)));
 
 		if(bworld->data[idx])
-			return faces[face];
+		{
+			//return faces[face];
+			__m128 cf = _mm_loadu_ps(&faces[face*4]);
+			cf = _mm_mul_ps(_mm_set1_ps(255.0f*vpos.a[face]), cf);
+			__m128i cd4 = _mm_cvtps_epi32(cf);
+			__m128i cd2 = _mm_packs_epi32(cd4, cd4);
+			v4f_t cd1;
+			cd1.mi = _mm_packus_epi16(cd2, cd2);
+			return (cd1.i[0]);
+		}
 	}
 
 	return 0xFFFFFFFF;
